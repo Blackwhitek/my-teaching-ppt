@@ -5,18 +5,14 @@ import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 from datetime import datetime
-import requests
-from io import BytesIO
 
 load_dotenv()
 
 st.set_page_config(page_title="教學投影片生成器", layout="wide")
 st.title("🧑‍🏫 依參考資料自動生成教學投影片")
-st.markdown("### 自動分析 + Pexels 高品質圖片自動插入")
+st.markdown("### 自動分析 + 圖片建議")
 
 api_key = os.getenv("GOOGLE_API_KEY")
-pexels_api_key = os.getenv("PEXELS_API_KEY")  # 新增
-
 if not api_key:
     st.error("❌ 未設定 GOOGLE_API_KEY")
     st.stop()
@@ -26,81 +22,91 @@ genai.configure(api_key=api_key)
 with st.sidebar:
     st.header("生成設定")
     model_name = st.selectbox("AI 模型", ["gemini-2.5-flash", "gemini-2.0-flash"])
-    num_slides = st.slider("投影片張數", 8, 25, 12)
+    num_slides = st.slider("投影片張數", 8, 20, 12)
 
-# 上傳檔案 + Pexels Key 提示
 uploaded_file = st.file_uploader("上傳參考資料（PDF / Word / TXT）", type=["pdf", "docx", "txt"])
-topic = st.text_input("專題名稱", placeholder="例如：光合作用原理")
+topic = st.text_input("專題名稱", placeholder="例如：台灣如何出聲")
 
-if st.button("🚀 生成含真實圖片的教學投影片", type="primary", use_container_width=True):
+if st.button("🚀 生成教學投影片", type="primary", use_container_width=True):
     if not uploaded_file and not topic:
         st.error("請上傳資料或輸入主題")
     else:
-        with st.spinner("AI 分析中 + 正在尋找高品質教育圖片..."):
+        with st.spinner("AI 正在嚴格按照格式生成投影片..."):
             
-            # 讀取檔案內容（略）
             file_content = ""
             if uploaded_file:
-                # ... (保持原本的讀取程式碼)
-                pass
+                try:
+                    if uploaded_file.type == "application/pdf":
+                        import PyPDF2
+                        pdf = PyPDF2.PdfReader(uploaded_file)
+                        file_content = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
+                    elif uploaded_file.type.startswith("application/vnd.openxmlformats"):
+                        from docx import Document
+                        doc = Document(uploaded_file)
+                        file_content = "\n".join([para.text for para in doc.paragraphs])
+                except:
+                    pass
 
-            # Prompt 優化
-            prompt = f"""...（保持你原本的 prompt）..."""
+            # 強制格式 Prompt
+            prompt = f"""
+你是一位嚴格遵守格式的教學簡報專家。
 
-            model = genai.GenerativeModel(model_name)
+主題：{topic}
+參考資料：{file_content[:12000]}
+
+請生成 {num_slides} 張教學投影片，**必須嚴格遵守以下格式**，不要加入任何額外解釋：
+
+**第1張：** [簡潔標題]
+**內容：**
+- 要點1（最多6個字）
+- 要點2
+**講者筆記：** [詳細說明]
+**建議圖片：** [具體描述]
+
+**第2張：** [簡潔標題]
+**內容：**
+- 要點1
+**講者筆記：** ...
+**建議圖片：** ...
+
+請從第1張開始，一直到第{num_slides}張為止，嚴格按照上面格式輸出，不要有其他文字。
+"""
+
+            model = genai.GenerativeModel(model_name, generation_config={"temperature": 0.7})
             response = model.generate_content(prompt)
             generated_text = response.text
 
-            # 生成 PPTX + Pexels 圖片
+            # 生成 PPTX
             prs = Presentation()
             parts = generated_text.split("**第")
 
             for i, part in enumerate(parts):
-                if len(part.strip()) < 15: continue
+                if len(part.strip()) < 10:
+                    continue
 
                 slide = prs.slides.add_slide(prs.slide_layouts[1])
-                title = slide.shapes.title
-                title.text = f"第{i}張 " + part.split("\n")[0].replace("：", "").strip()[:60]
+                title_shape = slide.shapes.title
+                title_shape.text = f"第{i}張 " + part.split("\n")[0].replace("：", "").strip()[:50]
 
-                # 插入文字內容
                 try:
                     tf = slide.placeholders[1].text_frame
                     tf.clear()
                     for line in part.split("\n"):
-                        if line.strip().startswith("-"):
+                        cleaned = line.strip()
+                        if cleaned.startswith("-") or cleaned.startswith("•"):
                             p = tf.add_paragraph()
-                            p.text = line.strip("- •").strip()
+                            p.text = cleaned.strip("- •").strip()
                             p.font.size = Pt(20)
                 except:
                     pass
 
-                # === Pexels 自動插入圖片 ===
-                if "建議圖片：" in part or "圖片：" in part:
-                    try:
-                        desc = part.split("建議圖片：")[-1].split("\n")[0].strip()[:100]
-                        headers = {"Authorization": pexels_api_key}
-                        r = requests.get(
-                            f"https://api.pexels.com/v1/search?query={desc}&per_page=1&orientation=landscape",
-                            headers=headers,
-                            timeout=10
-                        )
-                        if r.status_code == 200:
-                            photos = r.json().get("photos", [])
-                            if photos:
-                                img_url = photos[0]["src"]["large"]
-                                img_resp = requests.get(img_url, timeout=10)
-                                if img_resp.status_code == 200:
-                                    slide.shapes.add_picture(BytesIO(img_resp.content), 
-                                                           Inches(6.8), Inches(1.2), Inches(6))
-                    except:
-                        pass
-
-            filename = f"教學投影片_{topic[:20]}_{datetime.now().strftime('%m%d_%H%M')}.pptx"
+            filename = f"教學投影片_{topic[:15]}_{datetime.now().strftime('%m%d_%H%M')}.pptx"
             prs.save(filename)
 
-            st.success("✅ 生成完成！已嘗試插入 Pexels 高品質圖片")
+            st.success(f"✅ 已生成 {len(prs.slides)} 張投影片！")
+            
             with open(filename, "rb") as f:
-                st.download_button("📥 下載 .pptx", f, filename, use_container_width=True)
+                st.download_button("📥 下載 .pptx 檔案", f, filename, use_container_width=True)
 
-            with st.expander("AI 生成內容"):
+            with st.expander("查看 AI 原始輸出"):
                 st.write(generated_text)
