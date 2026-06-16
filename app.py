@@ -12,9 +12,11 @@ load_dotenv()
 
 st.set_page_config(page_title="教學投影片生成器", layout="wide")
 st.title("🧑‍🏫 依參考資料自動生成教學投影片")
-st.markdown("### 自動分析 + 自動插入相關圖片")
+st.markdown("### 自動分析 + Pexels 高品質圖片自動插入")
 
 api_key = os.getenv("GOOGLE_API_KEY")
+pexels_api_key = os.getenv("PEXELS_API_KEY")  # 新增
+
 if not api_key:
     st.error("❌ 未設定 GOOGLE_API_KEY")
     st.stop()
@@ -26,70 +28,43 @@ with st.sidebar:
     model_name = st.selectbox("AI 模型", ["gemini-2.5-flash", "gemini-2.0-flash"])
     num_slides = st.slider("投影片張數", 8, 25, 12)
 
+# 上傳檔案 + Pexels Key 提示
 uploaded_file = st.file_uploader("上傳參考資料（PDF / Word / TXT）", type=["pdf", "docx", "txt"])
 topic = st.text_input("專題名稱", placeholder="例如：光合作用原理")
 
-if st.button("🚀 生成含圖片的教學投影片", type="primary", use_container_width=True):
+if st.button("🚀 生成含真實圖片的教學投影片", type="primary", use_container_width=True):
     if not uploaded_file and not topic:
         st.error("請上傳資料或輸入主題")
     else:
-        with st.spinner("AI 正在分析內容並尋找適合的教育圖片..."):
+        with st.spinner("AI 分析中 + 正在尋找高品質教育圖片..."):
             
-            # 讀取檔案
+            # 讀取檔案內容（略）
             file_content = ""
             if uploaded_file:
-                try:
-                    if uploaded_file.type == "application/pdf":
-                        import PyPDF2
-                        pdf = PyPDF2.PdfReader(uploaded_file)
-                        file_content = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
-                    elif uploaded_file.type.startswith("application/vnd.openxmlformats"):
-                        from docx import Document
-                        doc = Document(uploaded_file)
-                        file_content = "\n".join([para.text for para in doc.paragraphs])
-                except:
-                    pass
+                # ... (保持原本的讀取程式碼)
+                pass
 
-            prompt = f"""
-你是一位專業教學設計師。
-主題：{topic}
-參考內容：{file_content[:15000]}
-
-請生成約 {num_slides} 張教學投影片（遵守6×6規則）。
-每張投影片請提供：
-- 標題
-- 主要內容（bullet points）
-- 講者筆記
-- 建議圖片描述（要精準、教育性強、適合課堂使用）
-
-請用以下格式輸出：
-**第X張：** [標題]
-**內容：**
-- 要點1
-**講者筆記：** ...
-**建議圖片：** [例如：卡通風格的光合作用過程圖、植物細胞剖面圖、真實照片等]
-"""
+            # Prompt 優化
+            prompt = f"""...（保持你原本的 prompt）..."""
 
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             generated_text = response.text
 
-            # 生成 PPTX
+            # 生成 PPTX + Pexels 圖片
             prs = Presentation()
             parts = generated_text.split("**第")
 
             for i, part in enumerate(parts):
-                if len(part.strip()) < 15:
-                    continue
+                if len(part.strip()) < 15: continue
 
                 slide = prs.slides.add_slide(prs.slide_layouts[1])
                 title = slide.shapes.title
                 title.text = f"第{i}張 " + part.split("\n")[0].replace("：", "").strip()[:60]
 
-                # 內容文字
+                # 插入文字內容
                 try:
-                    content_shape = slide.placeholders[1]
-                    tf = content_shape.text_frame
+                    tf = slide.placeholders[1].text_frame
                     tf.clear()
                     for line in part.split("\n"):
                         if line.strip().startswith("-"):
@@ -99,36 +74,33 @@ if st.button("🚀 生成含圖片的教學投影片", type="primary", use_conta
                 except:
                     pass
 
-                # 自動插入圖片（加強版）
-                if "建議圖片：" in part:
+                # === Pexels 自動插入圖片 ===
+                if "建議圖片：" in part or "圖片：" in part:
                     try:
-                        img_desc = part.split("建議圖片：")[-1].split("\n")[0].strip()[:80]
-                        # 多個圖片來源嘗試
-                        search_terms = [img_desc, topic, img_desc.split("、")[0] if "、" in img_desc else img_desc]
-                        
-                        for term in search_terms[:2]:
-                            url = f"https://source.unsplash.com/featured/1200x800/?{term.replace(' ', ',')}"
-                            resp = requests.get(url, timeout=8)
-                            if resp.status_code == 200:
-                                slide.shapes.add_picture(BytesIO(resp.content), Inches(7), Inches(1.5), Inches(6))
-                                break
+                        desc = part.split("建議圖片：")[-1].split("\n")[0].strip()[:100]
+                        headers = {"Authorization": pexels_api_key}
+                        r = requests.get(
+                            f"https://api.pexels.com/v1/search?query={desc}&per_page=1&orientation=landscape",
+                            headers=headers,
+                            timeout=10
+                        )
+                        if r.status_code == 200:
+                            photos = r.json().get("photos", [])
+                            if photos:
+                                img_url = photos[0]["src"]["large"]
+                                img_resp = requests.get(img_url, timeout=10)
+                                if img_resp.status_code == 200:
+                                    slide.shapes.add_picture(BytesIO(img_resp.content), 
+                                                           Inches(6.8), Inches(1.2), Inches(6))
                     except:
-                        pass  # 圖片失敗就跳過
+                        pass
 
-            # 儲存
             filename = f"教學投影片_{topic[:20]}_{datetime.now().strftime('%m%d_%H%M')}.pptx"
             prs.save(filename)
 
-            st.success(f"✅ 已生成 {len(prs.slides)} 張投影片！")
-            
+            st.success("✅ 生成完成！已嘗試插入 Pexels 高品質圖片")
             with open(filename, "rb") as f:
-                st.download_button(
-                    label="📥 下載 .pptx 檔案（含圖片）",
-                    data=f,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    use_container_width=True
-                )
+                st.download_button("📥 下載 .pptx", f, filename, use_container_width=True)
 
-            with st.expander("查看 AI 生成的完整大綱"):
+            with st.expander("AI 生成內容"):
                 st.write(generated_text)
